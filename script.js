@@ -326,13 +326,22 @@ function initPlayer(id, handle, options) {
 
                 hideLoadingIcon();
 
-                var duration = Number(media.duration);
-                if (!Number.isFinite(duration) || duration <= 0 || media.hlsPlayer) {
-                    options.offset = 0;
+                var resolvedDuration = Number(media.duration);
+                if ((!Number.isFinite(resolvedDuration) || resolvedDuration <= 0) && media.seekable && media.seekable.length > 0) {
+                    try {
+                        var seekableEnd = Number(media.seekable.end(media.seekable.length - 1));
+                        var seekableStart = Number(media.seekable.start(0)) || 0;
+                        if (Number.isFinite(seekableEnd) && seekableEnd > seekableStart) {
+                            resolvedDuration = seekableEnd - seekableStart;
+                        }
+                    } catch (_) {}
+                }
+
+                if (Number.isFinite(resolvedDuration) && resolvedDuration > 0) {
+                    options.duration = resolvedDuration;
+                } else {
                     options.duration = false;
                     options.loop = false;
-                } else {
-                    options.duration = duration;
                 }
 
                 if (media.youTubeApi) {
@@ -516,9 +525,10 @@ function update(data) {
                 player.volume = 0;
             }
 
-            if (data.options.duration && Number.isFinite(Number(player.duration)) && player.duration > 0) {
+            var syncDuration = Number(data.options.duration);
+            if (Number.isFinite(syncDuration) && syncDuration > 0) {
                 var targetOffset = Number.isFinite(Number(data.offset)) ? Number(data.offset) : Number(data.options.offset || 0);
-                var currentTime = targetOffset % player.duration;
+                var currentTime = targetOffset % syncDuration;
 
                 if (Math.abs(currentTime - player.currentTime) > maxTimeDifference) {
                     player.currentTime = currentTime;
