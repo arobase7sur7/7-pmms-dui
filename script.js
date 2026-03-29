@@ -211,6 +211,28 @@ function parseTimecode(timecode) {
     return Number.isFinite(direct) ? direct : 0;
 }
 
+function describeYouTubeError(code) {
+    var numeric = Number(code);
+    if (numeric === 2) return 'YouTube error 2: Invalid video request.';
+    if (numeric === 5) return 'YouTube error 5: HTML5 playback error.';
+    if (numeric === 100) return 'YouTube error 100: Video not found or private.';
+    if (numeric === 101 || numeric === 150) return 'YouTube error ' + numeric + ': Video owner blocked embedded playback.';
+    if (Number.isFinite(numeric)) return 'YouTube error ' + numeric + '.';
+    return 'YouTube playback error.';
+}
+
+function getPlaybackErrorMessage(media, fallbackText) {
+    if (media && media.error) {
+        if (media.error.message) {
+            return media.error.message;
+        }
+        if (media.error.code !== undefined && media.error.code !== null) {
+            return 'Media error code ' + media.error.code;
+        }
+    }
+    return fallbackText;
+}
+
 function removePlayer(player) {
     if (!player) {
         return;
@@ -229,6 +251,16 @@ function initPlayer(id, handle, options) {
     player.id = id;
     player.src = resolveUrl(options.url);
     player.dataset.handle = String(handle);
+
+    player.pmms = {
+        initialized: false,
+        attenuationFactor: options.attenuation && Number.isFinite(Number(options.attenuation.diffRoom))
+            ? Number(options.attenuation.diffRoom)
+            : 0,
+        volumeFactor: Number.isFinite(Number(options.diffRoomVolume)) ? Number(options.diffRoomVolume) : 1.0,
+        currentUrl: options.url
+    };
+
     document.body.appendChild(player);
 
     if (options.attenuation == null) {
@@ -245,7 +277,7 @@ function initPlayer(id, handle, options) {
             sendMessage('initError', {
                 handle: handle,
                 url: options.url,
-                message: media.error && media.error.message ? media.error.message : 'Unknown init error'
+                message: getPlaybackErrorMessage(media, 'Unknown init error')
             });
 
             media.remove();
@@ -253,14 +285,25 @@ function initPlayer(id, handle, options) {
         success: function (media) {
             media.className = 'player';
 
-            media.pmms = {};
+            media.pmms = media.pmms || {};
             media.pmms.initialized = false;
             media.pmms.attenuationFactor = options.attenuation.diffRoom;
             media.pmms.volumeFactor = options.diffRoomVolume || 1.0;
             media.pmms.currentUrl = options.url;
 
             media.volume = 0;
-            media.style.display = options.video ? 'block' : 'none';
+            media.style.display = options.video !== false ? 'block' : 'none';
+
+            if (media.youTubeApi && typeof media.youTubeApi.addEventListener === 'function') {
+                media.youTubeApi.addEventListener('onError', function (event) {
+                    hideLoadingIcon();
+                    sendMessage('playError', {
+                        handle: handle,
+                        url: options.url,
+                        message: describeYouTubeError(event && event.data)
+                    });
+                });
+            }
 
             media.addEventListener('error', function () {
                 hideLoadingIcon();
@@ -268,7 +311,7 @@ function initPlayer(id, handle, options) {
                 sendMessage('playError', {
                     handle: handle,
                     url: options.url,
-                    message: media.error && media.error.message ? media.error.message : 'Unknown playback error'
+                    message: getPlaybackErrorMessage(media, 'Unknown playback error')
                 });
 
                 if (!media.pmms.initialized) {
@@ -350,10 +393,26 @@ function getPlayer(handle, options) {
         player = initPlayer(id, handle, options);
     }
 
+    if (player && !player.pmms) {
+        player.pmms = {
+            initialized: false,
+            attenuationFactor: 0,
+            volumeFactor: 1.0,
+            currentUrl: options && options.url ? options.url : ''
+        };
+    }
+
     return player;
 }
 
 function setAttenuationFactor(player, target) {
+    if (!player.pmms) {
+        return;
+    }
+    if (!Number.isFinite(Number(target))) {
+        target = player.pmms.attenuationFactor || 0;
+    }
+
     if (player.pmms.attenuationFactor > target) {
         player.pmms.attenuationFactor -= 0.1;
     } else {
@@ -362,6 +421,13 @@ function setAttenuationFactor(player, target) {
 }
 
 function setVolumeFactor(player, target) {
+    if (!player.pmms) {
+        return;
+    }
+    if (!Number.isFinite(Number(target))) {
+        target = player.pmms.volumeFactor || 1.0;
+    }
+
     if (player.pmms.volumeFactor > target) {
         player.pmms.volumeFactor -= 0.01;
     } else {
@@ -402,6 +468,17 @@ function stop(handle) {
 }
 
 function update(data) {
+    if (!data || !data.options) {
+        return;
+    }
+
+    if (!data.options.attenuation) {
+        data.options.attenuation = { sameRoom: 0, diffRoom: 0 };
+    }
+    if (!Number.isFinite(Number(data.options.diffRoomVolume))) {
+        data.options.diffRoomVolume = 1.0;
+    }
+
     var player = getPlayer(data.handle, data.options);
     if (!player) {
         return;
@@ -439,7 +516,7 @@ function update(data) {
                 player.volume = 0;
             }
 
-            if (data.options.duration) {
+            if (data.options.duration && Number.isFinite(Number(player.duration)) && player.duration > 0) {
                 var targetOffset = Number.isFinite(Number(data.offset)) ? Number(data.offset) : Number(data.options.offset || 0);
                 var currentTime = targetOffset % player.duration;
 
@@ -454,7 +531,7 @@ function update(data) {
         }
     }
 
-    player.style.display = data.options.video ? 'block' : 'none';
+    player.style.display = data.options.video !== false ? 'block' : 'none';
 }
 
 window.addEventListener('message', function (event) {
