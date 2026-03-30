@@ -1,6 +1,12 @@
 ﻿const maxTimeDifference = 2;
 
 var resourceName = 'pmms';
+const RANGE_ENTER_BUFFER = 1.0;
+const RANGE_EXIT_BUFFER = 2.4;
+const RANGE_MISS_GRACE_MS = 1700;
+const DEFAULT_TRANSITION_SECONDS = 2.0;
+const MAX_TRANSITION_SECONDS = 8.0;
+
 var isRDR = false;
 var audioVisualizations = {};
 var currentServerEndpoint = '127.0.0.1:30120';
@@ -233,9 +239,105 @@ function getPlaybackErrorMessage(media, fallbackText) {
     return fallbackText;
 }
 
+function clamp01(value) {
+    if (!Number.isFinite(Number(value))) return 0;
+    return Math.max(0, Math.min(1, Number(value)));
+}
+
+function clampTransitionSeconds(value) {
+    if (!Number.isFinite(Number(value))) return DEFAULT_TRANSITION_SECONDS;
+    return Math.max(0, Math.min(MAX_TRANSITION_SECONDS, Number(value)));
+}
+
+function getNowMs() {
+    if (window.performance && typeof window.performance.now === 'function') {
+        return window.performance.now();
+    }
+    return Date.now();
+}
+
+function ensurePlayerState(player) {
+    if (!player.pmms) {
+        player.pmms = {};
+    }
+
+    if (!Number.isFinite(Number(player.pmms.attenuationFactor))) {
+        player.pmms.attenuationFactor = 0;
+    }
+    if (!Number.isFinite(Number(player.pmms.volumeFactor))) {
+        player.pmms.volumeFactor = 1.0;
+    }
+    if (!Number.isFinite(Number(player.pmms.transitionSeconds))) {
+        player.pmms.transitionSeconds = DEFAULT_TRANSITION_SECONDS;
+    }
+    if (player.pmms.inRange === undefined) {
+        player.pmms.inRange = true;
+    }
+    if (!Number.isFinite(Number(player.pmms.lastDistance))) {
+        player.pmms.lastDistance = -1;
+    }
+    if (!Number.isFinite(Number(player.pmms.lastDistanceAt))) {
+        player.pmms.lastDistanceAt = 0;
+    }
+}
+
+function startFadeOutAndRemove(player, transitionSeconds) {
+    if (!player) return;
+
+    var durationMs = Math.max(0, clampTransitionSeconds(transitionSeconds) * 1000);
+    if (durationMs <= 0) {
+        removePlayer(player);
+        return;
+    }
+
+    var startedAt = getNowMs();
+    var startVolume = clamp01(player.volume);
+    var raf = window.requestAnimationFrame || function(cb) { return setTimeout(function() { cb(getNowMs()); }, 16); };
+
+    var step = function(now) {
+        if (!player || !player.parentNode) {
+            return;
+        }
+
+        var elapsed = Math.max(0, now - startedAt);
+        var t = Math.min(1, elapsed / durationMs);
+        var nextVolume = startVolume * (1 - t);
+        player.volume = clamp01(nextVolume);
+
+        if (t >= 1) {
+            removePlayer(player);
+            return;
+        }
+
+        raf(step);
+    };
+
+    raf(step);
+}
+
+function getFadeInGain(player, nowMs) {
+    if (!player || !player.pmms || !player.pmms.fadeInEndsAt) {
+        return 1;
+    }
+
+    var startedAt = Number(player.pmms.fadeInStartedAt) || 0;
+    var endsAt = Number(player.pmms.fadeInEndsAt) || 0;
+    if (endsAt <= startedAt || nowMs >= endsAt) {
+        player.pmms.fadeInStartedAt = 0;
+        player.pmms.fadeInEndsAt = 0;
+        return 1;
+    }
+
+    return clamp01((nowMs - startedAt) / (endsAt - startedAt));
+}
+
 function removePlayer(player) {
     if (!player) {
         return;
+    }
+
+    if (player.pmms) {
+        player.pmms.removed = true;
     }
 
     var noise = document.getElementById(player.id + '_noise');
@@ -258,7 +360,13 @@ function initPlayer(id, handle, options) {
             ? Number(options.attenuation.diffRoom)
             : 0,
         volumeFactor: Number.isFinite(Number(options.diffRoomVolume)) ? Number(options.diffRoomVolume) : 1.0,
-        currentUrl: options.url
+        currentUrl: options.url,
+        transitionSeconds: clampTransitionSeconds(options.transitionSeconds),
+        fadeInStartedAt: 0,
+        fadeInEndsAt: 0,
+        inRange: true,
+        lastDistance: -1,
+        lastDistanceAt: 0
     };
 
     document.body.appendChild(player);
@@ -290,6 +398,12 @@ function initPlayer(id, handle, options) {
             media.pmms.attenuationFactor = options.attenuation.diffRoom;
             media.pmms.volumeFactor = options.diffRoomVolume || 1.0;
             media.pmms.currentUrl = options.url;
+            media.pmms.transitionSeconds = clampTransitionSeconds(options.transitionSeconds);
+            media.pmms.inRange = true;
+            media.pmms.lastDistance = -1;
+            media.pmms.lastDistanceAt = 0;
+            media.pmms.fadeInStartedAt = 0;
+            media.pmms.fadeInEndsAt = 0;
 
             media.volume = 0;
             media.style.display = options.video !== false ? 'block' : 'none';
@@ -364,6 +478,11 @@ function initPlayer(id, handle, options) {
                 });
 
                 media.pmms.initialized = true;
+                if (media.pmms.transitionSeconds > 0) {
+                    var fadeNow = getNowMs();
+                    media.pmms.fadeInStartedAt = fadeNow;
+                    media.pmms.fadeInEndsAt = fadeNow + (media.pmms.transitionSeconds * 1000);
+                }
                 media.play();
             });
 
@@ -407,50 +526,62 @@ function getPlayer(handle, options) {
             initialized: false,
             attenuationFactor: 0,
             volumeFactor: 1.0,
-            currentUrl: options && options.url ? options.url : ''
+            currentUrl: options && options.url ? options.url : '',
+            transitionSeconds: clampTransitionSeconds(options && options.transitionSeconds),
+            fadeInStartedAt: 0,
+            fadeInEndsAt: 0,
+            inRange: true,
+            lastDistance: -1,
+            lastDistanceAt: 0
         };
+    }
+
+    if (player) {
+        ensurePlayerState(player);
     }
 
     return player;
 }
 
 function setAttenuationFactor(player, target) {
-    if (!player.pmms) {
-        return;
+    ensurePlayerState(player);
+    var numericTarget = Number(target);
+    if (!Number.isFinite(numericTarget)) {
+        numericTarget = Number(player.pmms.attenuationFactor) || 0;
     }
-    if (!Number.isFinite(Number(target))) {
-        target = player.pmms.attenuationFactor || 0;
-    }
+    numericTarget = Math.max(0, Math.min(10, numericTarget));
 
-    if (player.pmms.attenuationFactor > target) {
-        player.pmms.attenuationFactor -= 0.1;
-    } else {
-        player.pmms.attenuationFactor += 0.1;
-    }
+    var current = Number(player.pmms.attenuationFactor) || 0;
+    player.pmms.attenuationFactor = current + ((numericTarget - current) * 0.25);
 }
 
 function setVolumeFactor(player, target) {
-    if (!player.pmms) {
-        return;
+    ensurePlayerState(player);
+    var numericTarget = Number(target);
+    if (!Number.isFinite(numericTarget)) {
+        numericTarget = Number(player.pmms.volumeFactor) || 1.0;
     }
-    if (!Number.isFinite(Number(target))) {
-        target = player.pmms.volumeFactor || 1.0;
-    }
+    numericTarget = clamp01(numericTarget);
 
-    if (player.pmms.volumeFactor > target) {
-        player.pmms.volumeFactor -= 0.01;
-    } else {
-        player.pmms.volumeFactor += 0.01;
-    }
+    var current = Number(player.pmms.volumeFactor) || 1.0;
+    player.pmms.volumeFactor = current + ((numericTarget - current) * 0.2);
 }
 
 function setVolume(player, target) {
-    if (Math.abs(player.volume - target) > 0.1) {
-        if (player.volume > target) {
-            player.volume -= 0.05;
-        } else {
-            player.volume += 0.05;
-        }
+    var normalizedTarget = clamp01(target);
+    var current = clamp01(player.volume);
+    var delta = normalizedTarget - current;
+
+    if (Math.abs(delta) <= 0.003) {
+        player.volume = normalizedTarget;
+        return;
+    }
+
+    var step = Math.min(0.08, Math.max(0.01, Math.abs(delta) * 0.35));
+    player.volume = current + (delta > 0 ? step : -step);
+
+    if ((delta > 0 && player.volume > normalizedTarget) || (delta < 0 && player.volume < normalizedTarget)) {
+        player.volume = normalizedTarget;
     }
 }
 
@@ -462,6 +593,7 @@ function init(data) {
     showLoadingIcon();
 
     data.options.offset = parseTimecode(data.options.offset);
+    data.options.transitionSeconds = clampTransitionSeconds(data.options.transitionSeconds);
     if (!data.options.title) {
         data.options.title = data.options.url;
     }
@@ -472,6 +604,13 @@ function init(data) {
 function stop(handle) {
     var player = getPlayer(handle);
     if (player) {
+        ensurePlayerState(player);
+        var transitionSeconds = clampTransitionSeconds(player.pmms.transitionSeconds);
+        if (transitionSeconds > 0) {
+            player.id = player.id + '_fade_' + Date.now();
+            startFadeOutAndRemove(player, transitionSeconds);
+            return;
+        }
         removePlayer(player);
     }
 }
@@ -492,39 +631,69 @@ function update(data) {
     if (!player) {
         return;
     }
+    ensurePlayerState(player);
+    player.pmms.transitionSeconds = clampTransitionSeconds(data.options.transitionSeconds);
 
-    if (data.options.paused || data.distance < 0 || data.distance > data.options.range) {
-        if (!player.paused) {
-            player.pause();
+    var nowMs = getNowMs();
+    var distance = Number(data.distance);
+    var hasDistance = Number.isFinite(distance) && distance >= 0;
+    if (hasDistance) {
+        player.pmms.lastDistance = distance;
+        player.pmms.lastDistanceAt = nowMs;
+    } else if (Number.isFinite(Number(player.pmms.lastDistance))
+        && Number(player.pmms.lastDistance) >= 0
+        && (nowMs - Number(player.pmms.lastDistanceAt || 0)) <= RANGE_MISS_GRACE_MS) {
+        distance = Number(player.pmms.lastDistance);
+        hasDistance = true;
+    }
+
+    var range = Number(data.options.range);
+    if (!Number.isFinite(range) || range < 0) {
+        range = 0;
+    }
+
+    if (hasDistance) {
+        if (player.pmms.inRange) {
+            if (distance > (range + RANGE_EXIT_BUFFER)) {
+                player.pmms.inRange = false;
+            }
+        } else if (distance <= (range + RANGE_ENTER_BUFFER)) {
+            player.pmms.inRange = true;
         }
+    } else if ((nowMs - Number(player.pmms.lastDistanceAt || 0)) > RANGE_MISS_GRACE_MS) {
+        player.pmms.inRange = false;
+    }
+
+    if (data.sameRoom) {
+        setAttenuationFactor(player, data.options.attenuation.sameRoom);
+        setVolumeFactor(player, 1.0);
     } else {
-        if (data.sameRoom) {
-            setAttenuationFactor(player, data.options.attenuation.sameRoom);
-            setVolumeFactor(player, 1.0);
-        } else {
-            setAttenuationFactor(player, data.options.attenuation.diffRoom);
-            setVolumeFactor(player, data.options.diffRoomVolume);
+        setAttenuationFactor(player, data.options.attenuation.diffRoom);
+        setVolumeFactor(player, data.options.diffRoomVolume);
+    }
+
+    if (player.readyState > 0) {
+        var targetVolume = 0;
+        var pausedByState = data.options.paused === true;
+        var inRange = player.pmms.inRange === true;
+        var serverVolume = Number(data.volume);
+        if (!Number.isFinite(serverVolume)) {
+            serverVolume = 100;
         }
 
-        if (player.readyState > 0) {
-            var volume;
+        if (!pausedByState && inRange && !data.options.muted && serverVolume > 0) {
+            var attenuationBase = ((100 - (Math.max(0, distance) * player.pmms.attenuationFactor)) / 100) * player.pmms.volumeFactor;
+            targetVolume = clamp01(attenuationBase * (serverVolume / 100));
+            targetVolume = clamp01(targetVolume * getFadeInGain(player, nowMs));
+        }
 
-            if (data.options.muted || data.volume === 0) {
-                volume = 0;
-            } else {
-                volume = (((100 - data.distance * player.pmms.attenuationFactor) / 100) * player.pmms.volumeFactor) * (data.volume / 100);
+        setVolume(player, targetVolume);
+
+        if (pausedByState) {
+            if (!player.paused) {
+                player.pause();
             }
-
-            if (volume > 0) {
-                if (data.distance > 100) {
-                    setVolume(player, volume);
-                } else {
-                    player.volume = volume;
-                }
-            } else {
-                player.volume = 0;
-            }
-
+        } else if (inRange) {
             var syncDuration = Number(data.options.duration);
             if (Number.isFinite(syncDuration) && syncDuration > 0) {
                 var targetOffset = Number.isFinite(Number(data.offset)) ? Number(data.offset) : Number(data.options.offset || 0);
@@ -538,6 +707,8 @@ function update(data) {
             if (player.paused) {
                 player.play();
             }
+        } else if (!player.paused && player.volume <= 0.01) {
+            player.pause();
         }
     }
 
