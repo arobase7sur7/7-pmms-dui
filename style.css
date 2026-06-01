@@ -1,0 +1,93 @@
+html,
+body {
+	position: relative;
+	width: 100vw;
+	height: 100vh;
+	padding: 0;
+	margin: 0;
+	overflow: hidden;
+	background: #000;
+}
+
+#loading {
+	position: absolute;
+	inset: 0;
+	z-index: 10;
+	background: #000;
+}
+
+body.pmms-recovering-source #loading {
+	background: rgba(0, 0, 0, 0.18);
+}
+
+#loading img {
+	position: absolute;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	object-fit: contain;
+}
+
+.player,
+video,
+mediaelementwrapper,
+mediaelementwrapper > iframe,
+mediaelementwrapper > video,
+.pmms-youtube-embed,
+.pmms-youtube-target,
+.pmms-youtube-embed iframe,
+.pmms-youtube-external,
+.pmms-youtube-external-frame,
+.pmms-hosted-player,
+.pmms-hosted-player-frame,
+.pmms-twitch-embed,
+.pmms-twitch-target,
+.pmms-twitch-embed iframe,
+.pmms-hls-canvas,
+.mejs__container,
+.mejs__mediaelement {
+	position: absolute !important;
+	inset: 0 !important;
+	width: 100vw !important;
+	height: 100vh !important;
+	max-width: none !important;
+	max-height: none !important;
+	padding: 0 !important;
+	margin: 0 !important;
+	background: #000;
+	visibility: visible;
+}
+
+video,
+mediaelementwrapper > video,
+.pmms-hls-canvas {
+	object-fit: contain;
+}
+
+.pmms-hls-canvas {
+	z-index: 2;
+	display: block;
+	pointer-events: none;
+}
+
+.pmms-youtube-embed iframe,
+.pmms-youtube-external-frame,
+.pmms-hosted-player-frame,
+.pmms-twitch-embed iframe {
+	display: block;
+	border: 0;
+}
+
+.pmms-stale-recovery {
+	z-index: 3 !important;
+	pointer-events: none !important;
+}
+
+.pmms-recovering {
+	z-index: 2 !important;
+}
+
+iframe,
+mediaelementwrapper > iframe {
+	border: 0;
+}
